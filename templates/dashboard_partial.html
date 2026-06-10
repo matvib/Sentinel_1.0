@@ -1,0 +1,27 @@
+<table>
+    <tr>
+        <th>Zone</th>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Condition</th>
+        <th>Battery</th>
+    </tr>
+    {% for sensor in sensors %}
+    <tr>
+        <td>{{ sensor.zone }}</td>
+        <td>{{ sensor.name }}</td>
+        <td>{{ sensor.type }}</td>
+        <td><span class="{% if sensor.cond %}alert-red{% endif %}">{{ sensor.cond }}</span></td>
+        <td><span class="{% if sensor.battery == 'Low' %}alert-red{% endif %}">{{ sensor.battery }}</span></td>
+    </tr>
+    {% endfor %}
+</table>
+
+<hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 40px 0 20px 0;">
+
+<h2>Recent Historical Events</h2>
+<div class="log-box">
+    {% for line in history %}
+        <div class="log-line">{{ line }}</div>
+    {% endfor %}
+</div>
