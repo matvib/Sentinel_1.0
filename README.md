@@ -1,13 +1,18 @@
 # Sentinel
 
+Get SMS alerts from a Alarm Panels CID messages
+
 A small self-hosted bridge between a home alarm panel and your phone. Sentinel
 listens for the panel's Contact ID reports over TCP, writes every event to a
 log with human-readable sensor names, shows that log live in a web dashboard,
 and sends SMS notifications for the events that matter — alarms and
 maintenance issues — via [46elks](https://46elks.com).
 
-Works with alarm panels that report standard Contact ID messages (CID, also
-known as Ademco Contact ID) over TCP/IP. Sensor names are discovered through
+Works with alarm panels that report standard 
+
+----> Contact ID messages (CID, alsoknown as Ademco Contact ID) <----
+
+over TCP/IP. Sensor names are discovered through
 the panel's HTTP API — the path defaults to `/action/sensorListGet` and is
 configurable in settings, so panels with a similar API but a different layout
 can be accommodated. Tested on a CTC-1852Z panel.
