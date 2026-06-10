@@ -3,6 +3,7 @@ import threading
 import json
 import os
 import re
+import datetime
 import requests
 from flask import Flask, render_template, request, redirect, url_for, Response
 
@@ -56,7 +57,6 @@ def read_recent_logs(limit=15):
 
 def append_to_log(message):
     """Helper to cleanly append text to our local log file."""
-    import datetime
     global event_counter
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
@@ -113,15 +113,30 @@ def update_dynamic_zones():
 # ==========================================
 # 2. SMS & ALARM LOGIC (BACKGROUND TASKS)
 # ==========================================
-def send_sms(message_text):
+CRITICAL_CODES = ["110", "120", "130", "134", "137"]
+MAINTENANCE_CODES = ["302", "384"]
+
+# The two SMS message types and their headers
+SMS_HEADERS = {"alarm": "‼️ Alarm", "alert": "⚠️ Alert"}
+
+def send_sms(sms_type, message_text, ignore_override=False):
+    """Sends an SMS of type 'alarm' or 'alert'; the header/icon is added here.
+    ignore_override is for manual tests, which should send even when the
+    override (meant to silence panel events) is active."""
     config = load_config()
     numbers = [n.strip() for n in config.get("TO_NUMBERS", []) if n and n.strip()]
     if not all([config["API_USER"], config["API_PASS"]]) or not numbers:
         print("SMS aborted: Missing credentials or recipient numbers.")
         return False
 
-    if config.get("SMS_OVERRIDE"):
-        append_to_log(f"SMS OVERRIDE: Suppressed SMS to {len(numbers)} recipient(s): {message_text}")
+    header = SMS_HEADERS.get(sms_type)
+    full_text = f"{header}\n{message_text}" if header else message_text
+
+    # Keep multiline SMS bodies on a single line in the event log
+    log_text = full_text.replace('\n', ' | ')
+
+    if config.get("SMS_OVERRIDE") and not ignore_override:
+        append_to_log(f"SMS OVERRIDE: Suppressed SMS to {len(numbers)} recipient(s): {log_text}")
         return False
 
     # 46elks requires one request per recipient, so loop over all configured numbers
@@ -131,12 +146,12 @@ def send_sms(message_text):
             response = requests.post(
                 'https://api.46elks.com/a1/sms',
                 auth=(config["API_USER"], config["API_PASS"]),
-                data={'from': config["FROM_SENDER"], 'to': number, 'message': message_text}
+                data={'from': config["FROM_SENDER"], 'to': number, 'message': full_text}
             )
             if response.status_code == 200:
-                append_to_log(f"SMS SENT to {number}: {message_text}")
+                append_to_log(f"SMS SENT to {number}: {log_text}")
             else:
-                append_to_log(f"SMS FAILED to {number} (HTTP {response.status_code}): {message_text}")
+                append_to_log(f"SMS FAILED to {number} (HTTP {response.status_code}): {log_text}")
                 all_ok = False
         except Exception as e:
             append_to_log(f"SMS FAILED to {number} (connection error): {e}")
@@ -197,10 +212,10 @@ def parse_and_handle_event(data_bytes):
 
         # --- SMS NOTIFICATIONS ---
         if qualifier == "1":
-            if event_code in ["110", "120", "130", "134", "137"]:
-                send_sms(f"CRITICAL ALARM: {event_desc} on {zone_name}!")
-            elif event_code in ["302", "384"]:
-                send_sms(f"MAINTENANCE ALERT: {event_desc} on {zone_name}. Please replace soon.")
+            if event_code in CRITICAL_CODES:
+                send_sms("alarm", f"{event_desc}\n{zone_name}")
+            elif event_code in MAINTENANCE_CODES:
+                send_sms("alert", f"{event_desc}\n{zone_name}")
 
     except Exception as e:
         append_to_log(f"Error parsing data: {e}")
@@ -302,9 +317,14 @@ def save_settings():
 
 @app.route('/test-sms', methods=['POST'])
 def test_sms():
-    success = send_sms("Sentinel Dashboard: This is a manual alert test transmission.")
-    if load_config().get("SMS_OVERRIDE"):
-        return redirect(url_for('home', tab='settings', sms_status='override'))
+    sms_type = request.form.get('sms_type', 'alert')
+    if sms_type == 'alarm':
+        message = "Burglary Alarm\nTest Zone\nTHIS IS A TEST"
+    else:
+        message = "Sensor Low Battery\nTest Zone\nTHIS IS A TEST"
+
+    # Tests bypass the override: that switch only silences panel events
+    success = send_sms(sms_type, message, ignore_override=True)
     if success:
         return redirect(url_for('home', tab='settings', sms_status='sent'))
     else:
