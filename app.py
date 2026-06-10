@@ -29,6 +29,7 @@ def load_config():
     config = {
         "RUN_PORT": 5000, # Web dashboard port (restart required to change)
         "PANEL_IP": "", # Blank = auto-detect from the panel's reporting IP
+        "PANEL_USER": "admin", "PANEL_PASS": "", # Panel web login, only in config.json
         "API_USER": "", "API_PASS": "",
         "TO_NUMBERS": [], # Up to 5 SMS recipients
         "FROM_SENDER": "HomeAlarm",
@@ -87,8 +88,9 @@ def update_dynamic_zones():
     if not base_url:
         return "No panel address known yet. Waiting for first report or a configured Panel URL."
     try:
+        config = load_config()
         url = f'{base_url}/action/sensorListGet'
-        response = requests.get(url, auth=('admin', 'admin1234'), timeout=5)
+        response = requests.get(url, auth=(config["PANEL_USER"], config["PANEL_PASS"]), timeout=5)
         raw_text = response.text
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}') + 1
@@ -303,7 +305,10 @@ def save_settings():
     if not 1 <= run_port <= 65535:
         run_port = 5000
 
-    updated_config = {
+    # Start from the existing config so keys without a form field
+    # (e.g. PANEL_USER/PANEL_PASS) survive a save from the UI
+    updated_config = load_config()
+    updated_config.update({
         "RUN_PORT": run_port,
         "PANEL_IP": (request.form.get('panel_ip') or '').strip(),
         "API_USER": request.form.get('api_user'),
@@ -311,7 +316,7 @@ def save_settings():
         "TO_NUMBERS": numbers,
         "FROM_SENDER": request.form.get('from_sender'),
         "SMS_OVERRIDE": request.form.get('sms_override') == 'on'
-    }
+    })
     save_config(updated_config)
     return redirect(url_for('home', tab='settings', success='true'))
 
