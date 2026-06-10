@@ -238,7 +238,14 @@ def remember_panel_ip(ip):
 # ==========================================
 @app.route('/')
 def home():
-    return render_template('index.html', config=load_config())
+    # Refresh the device list so the settings tab shows what the panel reports
+    discover_error = update_dynamic_zones()
+    devices = [
+        {"zone": zone, "name": info["name"], "type": info["type"]}
+        for zone, info in sorted(dynamic_zones.items())
+    ]
+    return render_template('index.html', config=load_config(), devices=devices,
+                           discover_error=discover_error, panel_addr=get_panel_base_url())
 
 @app.route('/api/live-dashboard')
 def live_dashboard():

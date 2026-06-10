@@ -18,6 +18,8 @@
         table { width: 100%; border-collapse: collapse; margin-top: 15px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #e2e8f0; }
         th { background: #f7fafc; font-weight: 600; color: #4a5568; }
+        .device-table { font-size: 14px; margin-top: 5px; }
+        .device-table th, .device-table td { padding: 6px 8px; }
         .alert-red { background-color: #fed7d7; color: #c53030; font-weight: bold; padding: 4px 8px; border-radius: 4px; }
         
         .btn { background: #3182ce; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
@@ -73,6 +75,20 @@
                 <label>Alarm Panel IP:</label>
                 <input type="text" name="panel_ip" value="{{ config.PANEL_IP }}" placeholder="192.168.1.193">
                 <small style="color: #718096;">Used to fetch sensor names for reports. Leave blank to auto-detect from the IP the panel reports from.</small>
+            </div>
+            <div class="form-group">
+                <label>Discovered Devices:</label>
+                {% if devices %}
+                <table class="device-table">
+                    <tr><th>Zone</th><th>Name</th><th>Type</th></tr>
+                    {% for d in devices %}
+                    <tr><td>{{ d.zone }}</td><td>{{ d.name }}</td><td>{{ d.type }}</td></tr>
+                    {% endfor %}
+                </table>
+                <small style="color: #718096;">{{ devices|length }} device(s) reported by {{ panel_addr }}/action/sensorListGet</small>
+                {% else %}
+                <small style="color: #718096;">No devices discovered yet{% if discover_error %} — {{ discover_error }}{% endif %}</small>
+                {% endif %}
             </div>
 
             <h3 style="color: #4a5568; border-bottom: 2px solid #e2e8f0; padding-bottom: 5px; margin-top: 30px;">46elks SMS Gateway</h3>
