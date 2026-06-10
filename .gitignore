@@ -1,2 +1,3 @@
 config.json 
 sentinel_events.log 
+__pycache__/

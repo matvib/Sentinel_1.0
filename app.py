@@ -4,29 +4,39 @@ import json
 import os
 import re
 import requests
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, Response
 
 app = Flask(__name__)
 CONFIG_FILE = "config.json"
 LOG_FILE = "sentinel_events.log"
 
-# Shared dictionary to hold our dynamic zones
+# Shared dictionary to hold our dynamic zones (zone number -> name/type)
 dynamic_zones = {}
-latest_sensors = []
+# IP the panel reports from, learned from the first CID message.
+# Used to fetch sensor names when no PANEL_URL is configured.
+panel_source_ip = None
+
+# Bumped on every log write; lets the event stream wake up waiting browsers.
+event_counter = 0
+event_cond = threading.Condition()
 
 # ==========================================
 # 1. CONFIGURATION & LOG READING
 # ==========================================
 def load_config():
-    """Loads config from file, or falls back to defaults."""
+    """Loads config from file, merged over defaults so missing keys are safe."""
+    config = {
+        "RUN_PORT": 5000, # Web dashboard port (restart required to change)
+        "PANEL_IP": "", # Blank = auto-detect from the panel's reporting IP
+        "API_USER": "", "API_PASS": "",
+        "TO_NUMBERS": [], # Up to 5 SMS recipients
+        "FROM_SENDER": "HomeAlarm",
+        "SMS_OVERRIDE": False # True = suppress all SMS (e.g. while replacing batteries)
+    }
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return {
-        "PANEL_URL": "http://192.168.1.193", # Default fallback
-        "API_USER": "", "API_PASS": "", 
-        "TO_NUMBER": "", "FROM_SENDER": "HomeAlarm"
-    }
+            config.update(json.load(f))
+    return config
 
 def save_config(data):
     with open(CONFIG_FILE, 'w') as f:
@@ -47,30 +57,46 @@ def read_recent_logs(limit=15):
 def append_to_log(message):
     """Helper to cleanly append text to our local log file."""
     import datetime
+    global event_counter
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(f"{timestamp} {message}\n")
+    # Wake up any browsers waiting on the event stream
+    with event_cond:
+        event_counter += 1
+        event_cond.notify_all()
+
+def get_panel_base_url():
+    """Configured PANEL_IP wins; otherwise fall back to the IP the panel reports from.
+    The panel only speaks plain http, so the scheme is always hardcoded."""
+    config = load_config()
+    configured = (config.get("PANEL_IP") or "").strip()
+    # Tolerate a pasted URL: strip any scheme/trailing slash so only the IP remains
+    configured = re.sub(r'^https?://', '', configured).strip('/')
+    if configured:
+        return f"http://{configured}"
+    if panel_source_ip:
+        return f"http://{panel_source_ip}"
+    return None
 
 def update_dynamic_zones():
-    """Fetches sensor data and updates globals."""
-    global dynamic_zones, latest_sensors
+    """Fetches the sensor list from the panel to map zone numbers to names.
+    If the panel can't be reached, events simply show raw zone numbers."""
+    global dynamic_zones
+    base_url = get_panel_base_url()
+    if not base_url:
+        return "No panel address known yet. Waiting for first report or a configured Panel URL."
     try:
-        # --- FIXED FOR DYNAMIC CONFIG ---
-        config = load_config()
-        base_url = config.get("PANEL_URL", "http://192.168.1.193").rstrip('/')
         url = f'{base_url}/action/sensorListGet'
-        
         response = requests.get(url, auth=('admin', 'admin1234'), timeout=5)
         raw_text = response.text
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}') + 1
         clean_text = raw_text[start_idx:end_idx]
         clean_json = re.sub(r'([a-zA-Z0-9_]+)\s*:', r'"\1":', clean_text)
-        
+
         sensor_list = json.loads(clean_json).get('senrows', [])
-        latest_sensors = sensor_list # Save for the web UI!
-        
-        # Build a smarter dictionary saving both name AND type
+
         new_zones = {}
         for sensor in sensor_list:
             zone_str = str(sensor.get('zone')).zfill(3)
@@ -78,34 +104,46 @@ def update_dynamic_zones():
                 "name": sensor.get('name', f"Zone {zone_str}"),
                 "type": sensor.get('type', 'Unknown')
             }
-            
+
         dynamic_zones = new_zones
-        return sensor_list, None
+        return None
     except Exception as e:
-        return [], f"Could not connect to panel status stream: {e}"
+        return f"Could not fetch sensor names from panel: {e}"
     
 # ==========================================
 # 2. SMS & ALARM LOGIC (BACKGROUND TASKS)
 # ==========================================
 def send_sms(message_text):
     config = load_config()
-    if not all([config["API_USER"], config["API_PASS"], config["TO_NUMBER"]]):
-        print("SMS aborted: Missing credentials.")
+    numbers = [n.strip() for n in config.get("TO_NUMBERS", []) if n and n.strip()]
+    if not all([config["API_USER"], config["API_PASS"]]) or not numbers:
+        print("SMS aborted: Missing credentials or recipient numbers.")
         return False
 
-    try:
-        response = requests.post(
-            'https://api.46elks.com/a1/sms',
-            auth=(config["API_USER"], config["API_PASS"]),
-            data={'from': config["FROM_SENDER"], 'to': config["TO_NUMBER"], 'message': message_text}
-        )
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Error connecting to 46elks: {e}")
+    if config.get("SMS_OVERRIDE"):
+        append_to_log(f"SMS OVERRIDE: Suppressed SMS to {len(numbers)} recipient(s): {message_text}")
         return False
+
+    # 46elks requires one request per recipient, so loop over all configured numbers
+    all_ok = True
+    for number in numbers:
+        try:
+            response = requests.post(
+                'https://api.46elks.com/a1/sms',
+                auth=(config["API_USER"], config["API_PASS"]),
+                data={'from': config["FROM_SENDER"], 'to': number, 'message': message_text}
+            )
+            if response.status_code == 200:
+                append_to_log(f"SMS SENT to {number}: {message_text}")
+            else:
+                append_to_log(f"SMS FAILED to {number} (HTTP {response.status_code}): {message_text}")
+                all_ok = False
+        except Exception as e:
+            append_to_log(f"SMS FAILED to {number} (connection error): {e}")
+            all_ok = False
+    return all_ok
 
 def parse_and_handle_event(data_bytes):
-    global dynamic_zones, latest_sensors
     try:
         data_str = data_bytes.decode('utf-8', errors='replace').strip()
         match = re.search(r'\[(\d{4})\s18([13])(\d{3})(\d{2})(\d{3})', data_str)
@@ -125,11 +163,14 @@ def parse_and_handle_event(data_bytes):
 
         event_desc = event_names.get(event_code, f"Unknown Code {event_code}")
         
+        # Look up the friendly name; refresh from the panel once if this zone is new.
+        # If the panel is unreachable/unconfigured, fall back to the raw zone number.
         zone_info = dynamic_zones.get(zone)
         if not zone_info:
             update_dynamic_zones()
-            zone_info = dynamic_zones.get(zone, {"name": f"System/Zone {zone}", "type": "Unknown"})
-            
+            zone_info = dynamic_zones.get(zone, {"name": f"Zone {zone}", "type": "Unknown"})
+
+
         zone_name = zone_info["name"]
         zone_type = zone_info["type"]
         
@@ -154,27 +195,6 @@ def parse_and_handle_event(data_bytes):
         log_msg = f"{status}: {event_desc} on {zone_name}"
         append_to_log(log_msg)
 
-        # --- INSTANT MEMORY UPDATE ---
-        for s in latest_sensors:
-            if str(s.get('zone')).zfill(3) == zone:
-                if qualifier == "1":
-                    if event_code == "384":
-                        s['battery'] = "Low"
-                    elif zone_type == "Door Contact":
-                        s['cond'] = "Open"
-                    elif zone_type == "IR Camera":
-                        s['cond'] = "Motion"
-                    elif zone_type == "Smoke Sensor":
-                        s['cond'] = "Smoke"
-                    else:
-                        s['cond'] = "Alert"
-                else:
-                    if event_code == "384":
-                        s['battery'] = ""
-                    else:
-                        s['cond'] = ""
-                break 
-
         # --- SMS NOTIFICATIONS ---
         if qualifier == "1":
             if event_code in ["110", "120", "130", "134", "137"]:
@@ -197,34 +217,78 @@ def run_tcp_server():
                 with conn:
                     data = conn.recv(1024)
                     if data:
+                        remember_panel_ip(addr[0])
                         parse_and_handle_event(data)
                         conn.sendall(b'\x06')
             except Exception as e:
                 print(f"TCP Error: {e}")
+
+def remember_panel_ip(ip):
+    """Learn the panel's address from where its reports originate."""
+    global panel_source_ip
+    if panel_source_ip != ip:
+        panel_source_ip = ip
+        # New (or first) panel address: refresh the zone name map from it
+        # unless a panel IP is explicitly configured.
+        if not (load_config().get("PANEL_IP") or "").strip():
+            update_dynamic_zones()
 
 # ==========================================
 # 3. WEB DASHBOARD ROUTES
 # ==========================================
 @app.route('/')
 def home():
-    sensor_list, error_msg = update_dynamic_zones()
-    history = read_recent_logs(limit=15)
-    return render_template('index.html', sensors=sensor_list, config=load_config(), history=history, error=error_msg)
+    return render_template('index.html', config=load_config())
 
 @app.route('/api/live-dashboard')
 def live_dashboard():
-    history = read_recent_logs(limit=15)
-    return render_template('dashboard_partial.html', sensors=latest_sensors, history=history)
+    history = read_recent_logs(limit=30)
+    return render_template('dashboard_partial.html', history=history)
+
+@app.route('/api/event-stream')
+def event_stream():
+    """Server-Sent Events: notifies the browser only when a new log entry lands."""
+    def generate():
+        last_seen = event_counter
+        # Send a first byte immediately so the browser's onopen fires right away
+        # (otherwise headers wait for the first keepalive, up to 30s)
+        yield "retry: 3000\n\n"
+        while True:
+            with event_cond:
+                event_cond.wait(timeout=30)
+                current = event_counter
+            if current != last_seen:
+                last_seen = current
+                yield "data: update\n\n"
+            else:
+                # Periodic comment keeps the connection from timing out
+                yield ": keepalive\n\n"
+    return Response(generate(), mimetype='text/event-stream')
 
 @app.route('/settings', methods=['POST'])
 def save_settings():
-    # --- FIXED TO CAPTURE PANEL URL ---
+    # Collect up to 5 recipient numbers, skipping empty fields
+    numbers = []
+    for i in range(1, 6):
+        n = (request.form.get(f'to_number_{i}') or '').strip()
+        if n:
+            numbers.append(n)
+
+    try:
+        run_port = int(request.form.get('run_port') or 5000)
+    except ValueError:
+        run_port = 5000
+    if not 1 <= run_port <= 65535:
+        run_port = 5000
+
     updated_config = {
-        "PANEL_URL": request.form.get('panel_url'),
+        "RUN_PORT": run_port,
+        "PANEL_IP": (request.form.get('panel_ip') or '').strip(),
         "API_USER": request.form.get('api_user'),
         "API_PASS": request.form.get('api_pass'),
-        "TO_NUMBER": request.form.get('to_number'),
-        "FROM_SENDER": request.form.get('from_sender')
+        "TO_NUMBERS": numbers,
+        "FROM_SENDER": request.form.get('from_sender'),
+        "SMS_OVERRIDE": request.form.get('sms_override') == 'on'
     }
     save_config(updated_config)
     return redirect(url_for('home', tab='settings', success='true'))
@@ -232,16 +296,24 @@ def save_settings():
 @app.route('/test-sms', methods=['POST'])
 def test_sms():
     success = send_sms("Sentinel Dashboard: This is a manual alert test transmission.")
+    if load_config().get("SMS_OVERRIDE"):
+        return redirect(url_for('home', tab='settings', sms_status='override'))
     if success:
         return redirect(url_for('home', tab='settings', sms_status='sent'))
     else:
         return redirect(url_for('home', tab='settings', sms_status='failed'))
 
 if __name__ == '__main__':
-    print("[*] Performing initial zone sync with panel...")
-    update_dynamic_zones()
-    print(f"[*] Loaded {len(dynamic_zones)} zones into memory.")
+    print("[*] Performing initial zone name sync with panel...")
+    error = update_dynamic_zones()
+    if error:
+        print(f"[*] {error} Events will show raw zone numbers until names are available.")
+    else:
+        print(f"[*] Loaded {len(dynamic_zones)} zone names into memory.")
 
     tcp_thread = threading.Thread(target=run_tcp_server, daemon=True)
     tcp_thread.start()
-    app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
+
+    run_port = int(load_config().get("RUN_PORT", 5000))
+    print(f"[*] Web dashboard starting on port {run_port}.")
+    app.run(debug=True, host='0.0.0.0', port=run_port, use_reloader=False)
