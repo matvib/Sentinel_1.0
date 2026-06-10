@@ -28,8 +28,10 @@ def load_config():
     """Loads config from file, merged over defaults so missing keys are safe."""
     config = {
         "RUN_PORT": 5000, # Web dashboard port (restart required to change)
+        "CID_PORT": 5002, # TCP port the panel sends Contact ID reports to (restart required)
         "PANEL_IP": "", # Blank = auto-detect from the panel's reporting IP
         "PANEL_USER": "admin", "PANEL_PASS": "", # Panel web login, only in config.json
+        "DISCOVERY_PATH": "/action/sensorListGet", # Panel HTTP API path for the sensor list
         "API_USER": "", "API_PASS": "",
         "TO_NUMBERS": [], # Up to 5 SMS recipients
         "FROM_SENDER": "HomeAlarm",
@@ -89,7 +91,10 @@ def update_dynamic_zones():
         return "No panel address known yet. Waiting for first report or a configured Panel URL."
     try:
         config = load_config()
-        url = f'{base_url}/action/sensorListGet'
+        path = config.get("DISCOVERY_PATH") or "/action/sensorListGet"
+        if not path.startswith('/'):
+            path = '/' + path
+        url = f'{base_url}{path}'
         response = requests.get(url, auth=(config["PANEL_USER"], config["PANEL_PASS"]), timeout=5)
         raw_text = response.text
         start_idx = raw_text.find('{')
@@ -223,10 +228,12 @@ def parse_and_handle_event(data_bytes):
         append_to_log(f"Error parsing data: {e}")
 
 def run_tcp_server():
-    HOST, PORT = '0.0.0.0', 5002
+    HOST = '0.0.0.0'
+    port = int(load_config().get("CID_PORT", 5002))
+    print(f"[*] Contact ID listener on port {port}.")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((HOST, PORT))
+        s.bind((HOST, port))
         s.listen(5)
         while True:
             try:
@@ -305,12 +312,29 @@ def save_settings():
     if not 1 <= run_port <= 65535:
         run_port = 5000
 
+    try:
+        cid_port = int(request.form.get('cid_port') or 5002)
+    except ValueError:
+        cid_port = 5002
+    if not 1 <= cid_port <= 65535:
+        cid_port = 5002
+
+    # The web dashboard and the Contact ID listener cannot share a port
+    if cid_port == run_port:
+        return redirect(url_for('home', tab='settings', error='port_conflict'))
+
     # Start from the existing config so keys without a form field
     # (e.g. PANEL_USER/PANEL_PASS) survive a save from the UI
+    discovery_path = (request.form.get('discovery_path') or '').strip() or "/action/sensorListGet"
+    if not discovery_path.startswith('/'):
+        discovery_path = '/' + discovery_path
+
     updated_config = load_config()
     updated_config.update({
         "RUN_PORT": run_port,
+        "CID_PORT": cid_port,
         "PANEL_IP": (request.form.get('panel_ip') or '').strip(),
+        "DISCOVERY_PATH": discovery_path,
         "API_USER": request.form.get('api_user'),
         "API_PASS": request.form.get('api_pass'),
         "TO_NUMBERS": numbers,

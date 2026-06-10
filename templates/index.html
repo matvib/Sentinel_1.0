@@ -69,12 +69,22 @@
                 <input type="number" name="run_port" value="{{ config.RUN_PORT }}" min="1" max="65535">
                 <small style="color: #718096;">Web dashboard port. Restart Sentinel for a port change to take effect.</small>
             </div>
+            <div class="form-group">
+                <label>Panel Reporting Port:</label>
+                <input type="number" name="cid_port" value="{{ config.CID_PORT }}" min="1" max="65535">
+                <small style="color: #718096;">TCP port Sentinel listens on for the panel's Contact ID reports — set the panel's reporting destination to this host and port. Must differ from the web dashboard port. Restart to apply.</small>
+            </div>
 
             <h3 style="color: #4a5568; border-bottom: 2px solid #e2e8f0; padding-bottom: 5px; margin-top: 30px;">Panel Connection</h3>
             <div class="form-group">
                 <label>Alarm Panel IP:</label>
                 <input type="text" name="panel_ip" value="{{ config.PANEL_IP }}" placeholder="192.168.1.193">
                 <small style="color: #718096;">Used to fetch sensor names for reports. Leave blank to auto-detect from the IP the panel reports from.</small>
+            </div>
+            <div class="form-group">
+                <label>Sensor Discovery Path:</label>
+                <input type="text" name="discovery_path" value="{{ config.DISCOVERY_PATH }}" placeholder="/action/sensorListGet">
+                <small style="color: #718096;">Panel HTTP API path that returns the sensor list. Leave as is unless your panel model uses a different path.</small>
             </div>
             <div class="form-group">
                 <label>Discovered Devices:</label>
@@ -85,7 +95,7 @@
                     <tr><td>{{ d.zone }}</td><td>{{ d.name }}</td><td>{{ d.type }}</td></tr>
                     {% endfor %}
                 </table>
-                <small style="color: #718096;">{{ devices|length }} device(s) reported by {{ panel_addr }}/action/sensorListGet</small>
+                <small style="color: #718096;">{{ devices|length }} device(s) reported by {{ panel_addr }}{{ config.DISCOVERY_PATH }}</small>
                 {% else %}
                 <small style="color: #718096;">No devices discovered yet{% if discover_error %} — {{ discover_error }}{% endif %}</small>
                 {% endif %}
@@ -146,6 +156,12 @@
     
     if (targetTab === 'settings') {
         switchTab('settings');
+        if (urlParams.get('error') === 'port_conflict') {
+            const msg = document.createElement('div');
+            msg.className = 'error';
+            msg.innerText = 'The web dashboard port and the panel reporting port cannot be the same. Settings were NOT saved.';
+            document.getElementById('settings').prepend(msg);
+        }
         if (urlParams.get('success') === 'true') {
             const msg = document.createElement('div');
             msg.className = 'success';
