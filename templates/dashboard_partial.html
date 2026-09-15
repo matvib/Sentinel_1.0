@@ -1,3 +1,11 @@
+{% if outbox.pending %}
+<div class="outbox-banner">
+    ⏳ {{ outbox.pending }} SMS pending delivery
+    {% if outbox.last_error %}
+        — last attempt failed ({{ outbox.last_error }}), retry in {{ outbox.retry_in }}s
+    {% endif %}
+</div>
+{% endif %}
 <div class="log-box">
     {% for line in history %}
         <div class="log-line">{{ line }}</div>

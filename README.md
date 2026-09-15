@@ -1,6 +1,6 @@
 # Sentinel
 
-Get SMS alerts from a Alarm Panels CID messages
+Get SMS alerts from an alarm panel's Contact ID messages.
 
 A small self-hosted bridge between a home alarm panel and your phone. Sentinel
 listens for the panel's Contact ID reports over TCP, writes every event to a
@@ -8,14 +8,14 @@ log with human-readable sensor names, shows that log live in a web dashboard,
 and sends SMS notifications for the events that matter — alarms and
 maintenance issues — via [46elks](https://46elks.com).
 
-Works with alarm panels that report standard 
+**Scope:** the receiver, parser and SMS logic are generic **Ademco Contact ID
+over TCP/IP** and should work with any panel that reports that way. The
+sensor-name lookup, however, uses the Climax/Vesta local HTTP API
+(`/action/sensorListGet`, configurable) and has only been tested on a
+**Climax/Vesta CTC-1852Z**. Other panels will work but show raw zone numbers
+unless their API happens to match.
 
-----> Contact ID messages (CID, alsoknown as Ademco Contact ID) <----
-
-over TCP/IP. Sensor names are discovered through
-the panel's HTTP API — the path defaults to `/action/sensorListGet` and is
-configurable in settings, so panels with a similar API but a different layout
-can be accommodated. Tested on a CTC-1852Z panel.
+> ⚠️ **Read [Panel side: it must be running 24/7](#panel-side-it-must-be-running-247) before pointing a panel at this.**
 
 ## How it works
 
@@ -39,6 +39,37 @@ Alarm panel ──(Contact ID over TCP, default port 5002)──> Sentinel
 - Critical events (fire, panic, burglary, tamper) send an `‼️ Alarm` SMS;
   maintenance events (low battery) send a `⚠️ Alert` SMS. One message per
   recipient, every send logged.
+
+## Panel side: it must be running 24/7
+
+On the CTC-1852Z (and likely other Climax panels) an unreachable reporting
+receiver is a **communication failure**. The panel's status LED turns red and,
+**if the panel is armed, the siren sounds**. Panels on an alarm-company
+contract never hit this because they fall back to the built-in GSM modem; a
+CTC-1852Z run standalone has a 2G-only Cinterion BGS3 modem, which has no
+network left to register on in most countries — so Ethernet to this receiver
+is the *only* path.
+
+That means:
+
+- Run Sentinel as an **auto-restarting service on an always-on machine**
+  (container next to Home Assistant, systemd unit, Windows service) — not as
+  `python app.py` in a terminal on a desktop that sleeps.
+- **Start Sentinel before plugging the panel in**, and confirm the first report
+  arrives (dashboard, or `sentinel_events.log`).
+- If you take Sentinel away for good, **clear the reporting URL on the panel
+  first**.
+- Think about the panel's backup battery: during a mains outage the panel
+  stays up on battery while this receiver goes down — armed panel, siren.
+  Either disconnect the battery (the CTC-1852Z boots *disarmed* after a full
+  power loss, so it comes back quiet) or put the receiver and network gear on a
+  UPS. See the
+  [vesta-local-ha README](https://github.com/mphel44/vesta-local-ha#-running-the-panel-standalone-no-alarm-company-no-gsm)
+  for the full reasoning.
+
+Panel reporting setting (web UI): `rptn://1234@<sentinel-ip>:5002` — account
+number `1234`, port matching `CID_PORT`. Sentinel ACKs every report with
+`0x06`.
 
 ## Setup
 
